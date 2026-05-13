@@ -1,0 +1,11 @@
+[
+  {
+    "source": "CWE-692",
+    "nature": "FollowedBy",
+    "target": "CWE-79",
+    "target_name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
+    "source_type": "cwe_official_html",
+    "source_url": "https://cwe.mitre.org/data/definitions/692.html",
+    "notes": "CWE-692 Chain Components table shows FollowedBy CWE-79. Not produced by GraphKer import from NVD/CWE XML; patched from official CWE HTML."
+  }
+]

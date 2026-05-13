@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from .neo4j_client import Neo4jClient
 from .tools.lookup_cve import lookup_cve
@@ -31,6 +32,8 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    # ── read-only triage tools ────────────────────────────────────────────────
+
     # triage
     p_triage = sub.add_parser("triage", help="Full SOC triage from alert text")
     p_triage.add_argument("--text", required=True, help="Alert text")
@@ -56,6 +59,43 @@ def main() -> None:
 
     # schema
     sub.add_parser("schema", help="Show Neo4j labels and relationship types")
+
+    # ── data-patch tools (write, CLI-only, not exposed as MCP tools) ─────────
+
+    # import-cwe-chain-components
+    p_import = sub.add_parser(
+        "import-cwe-chain-components",
+        help="Patch missing CWE chain component relationships into Neo4j (write)",
+    )
+    p_import.add_argument(
+        "--file",
+        required=True,
+        metavar="PATH",
+        help="JSON patch file (default: cyber_graph_triage/data/cwe_chain_components_patch.json)",
+    )
+    p_import.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and show plan without writing to Neo4j",
+    )
+    p_import.add_argument(
+        "--allow-create-placeholder",
+        action="store_true",
+        help="Create a stub CWE node if the target does not exist (default: skip with warning)",
+    )
+
+    # validate-cwe-chain
+    p_validate = sub.add_parser(
+        "validate-cwe-chain",
+        help="Show Related_Weakness natures for a CWE and check expected chain relations",
+    )
+    p_validate.add_argument("cwe_id", help="e.g. CWE-692")
+    p_validate.add_argument(
+        "--patch-file",
+        default=None,
+        metavar="PATH",
+        help="Patch file to compare against (default: built-in patch file)",
+    )
 
     args = parser.parse_args()
     client = Neo4jClient()
@@ -86,11 +126,53 @@ def main() -> None:
         elif args.cmd == "schema":
             _out(schema_introspection(client))
 
+        elif args.cmd == "import-cwe-chain-components":
+            _cmd_import(client, args)
+
+        elif args.cmd == "validate-cwe-chain":
+            _cmd_validate(client, args)
+
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     finally:
         client.close()
+
+
+def _cmd_import(client: Neo4jClient, args: argparse.Namespace) -> None:
+    from .importers.cwe_chain_components import load_patch_file, run_import
+
+    patch_path = Path(args.file)
+    if not patch_path.exists():
+        print(f"Error: file not found: {patch_path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        entries = load_patch_file(patch_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    result = run_import(
+        client,
+        entries,
+        dry_run=args.dry_run,
+        allow_create_placeholder=args.allow_create_placeholder,
+        input_file=str(patch_path),
+    )
+    _out(result)
+    if result["skipped"] > 0:
+        sys.exit(2)
+
+
+def _cmd_validate(client: Neo4jClient, args: argparse.Namespace) -> None:
+    from .importers.cwe_chain_components import validate_chain
+
+    patch_file = Path(args.patch_file) if args.patch_file else None
+    result = validate_chain(client, args.cwe_id, patch_file=patch_file)
+    _out(result)
+    if result.get("warnings"):
+        sys.exit(2)
 
 
 if __name__ == "__main__":
