@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cyber-graph-triage"
+version = "0.1.0"
+description = "SOC Triage Mode PoC — MCP server over Neo4j cybersecurity knowledge graph"
+requires-python = ">=3.11"
+dependencies = [
+    "neo4j>=5.0",
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+    "mcp[cli]>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cyber_graph_triage*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
