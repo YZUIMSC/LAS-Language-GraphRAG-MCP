@@ -4,7 +4,14 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.sse import SseServerTransport
+from mcp.server import Server
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
 
 from cyber_graph_triage.neo4j_client import Neo4jClient
 from cyber_graph_triage.tools.lookup_cve import lookup_cve as _lookup_cve
@@ -16,7 +23,6 @@ from cyber_graph_triage.triage_service import triage_alert as _triage_alert
 
 mcp = FastMCP("cyber-graph-triage")
 
-# Shared client — lazily initialises on first use
 _client = Neo4jClient()
 
 
@@ -69,6 +75,35 @@ async def schema_introspection() -> dict[str, Any]:
     return _schema(_client)
 
 
+def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:
+    """Create a Starlette app serving the MCP server over SSE transport."""
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request: Request) -> None:
+        async with sse.connect_sse(
+            request.scope,
+            request.receive,
+            request._send,  # noqa: SLF001
+        ) as (read_stream, write_stream):
+            await mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp_server.create_initialization_options(),
+            )
+
+    async def handle_health(request: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok", "server": "cyber-graph-triage"})
+
+    return Starlette(
+        debug=debug,
+        routes=[
+            Route("/health", endpoint=handle_health),
+            Route("/sse", endpoint=handle_sse),
+            Mount("/messages/", app=sse.handle_post_message),
+        ],
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cyber Graph Triage MCP Server")
     parser.add_argument(
@@ -79,9 +114,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     if args.transport == "sse":
-        mcp.run(transport="sse", host=args.host, port=args.port)
+        mcp_server = mcp._mcp_server  # noqa: SLF001
+        starlette_app = create_starlette_app(mcp_server, debug=args.debug)
+        uvicorn.run(starlette_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
