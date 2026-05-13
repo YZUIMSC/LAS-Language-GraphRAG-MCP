@@ -151,7 +151,9 @@ async def test_triage_alert_no_neo4j():
             assert "CVE-2021-34709" in data["extracted"]["cves"]
             assert "report" in data
             assert "SOC Triage Report" in data["report"]
-            assert isinstance(data["assessment"]["risk_signals"], list)
+            assert isinstance(data["assessment"]["observed_signals"], list)
+            assert isinstance(data["assessment"]["graph_context_signals"], list)
+            assert isinstance(data["assessment"]["prioritization_signals"], list)
             assert isinstance(data["assessment"]["limitations"], list)
 
 

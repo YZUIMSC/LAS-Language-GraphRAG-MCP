@@ -34,12 +34,14 @@ def triage_alert(
 
     product_vulns: list[dict] = []
     for kw in cpe_keywords:
-        product_vulns.extend(lookup_cpe_vulnerabilities(client, kw))
+        result = lookup_cpe_vulnerabilities(client, kw)
+        if "results" in result:
+            product_vulns.extend(result["results"])
+        else:
+            product_vulns.append(result)
 
     evidence_paths = _collect_evidence_paths(cve_traces)
-    risk_signals, warnings, limitations = _assess(
-        cve_results, cwe_results, cve_traces, product_vulns, cves, cwes
-    )
+    assessment = _assess(cve_results, cwe_results, cve_traces, product_vulns, cves, cwes, alert_text)
 
     result: dict[str, Any] = {
         "mode": "SOC_TRIAGE",
@@ -60,11 +62,7 @@ def triage_alert(
             "cwes": cwe_results,
             "product_vulnerabilities": product_vulns,
         },
-        "assessment": {
-            "risk_signals": risk_signals,
-            "warnings": warnings,
-            "limitations": limitations,
-        },
+        "assessment": assessment,
         "evidence_paths": evidence_paths,
     }
 
@@ -76,10 +74,10 @@ def triage_alert(
 
 def _collect_evidence_paths(cve_traces: dict[str, Any]) -> list[dict[str, Any]]:
     paths = []
-    for cve_id, trace in cve_traces.items():
+    for _cve_id, trace in cve_traces.items():
         for p in trace.get("paths", []):
             if p.get("cwe") or p.get("capec"):
-                paths.append({"cve": cve_id, **p})
+                paths.append(p)
     return paths
 
 
@@ -90,31 +88,53 @@ def _assess(
     product_vulns: list,
     cves: list,
     cwes: list,
-) -> tuple[list[str], list[str], list[str]]:
-    risk_signals: list[str] = []
-    warnings: list[str] = []
-    limitations: list[str] = []
+    alert_text: str,
+) -> dict[str, Any]:
+    # Layer 1 — extracted directly from alert input
+    observed_signals: list[str] = []
+    if cves:
+        observed_signals.append(f"Alert text contains CVE reference(s): {', '.join(cves)}")
+    if cwes:
+        observed_signals.append(f"Alert text contains CWE reference(s): {', '.join(cwes)}")
 
-    for cve_id, cve_data in cve_results.items():
-        for score_entry in cve_data.get("cvss3", []):
-            sev = (score_entry.get("severity") or "").upper()
-            if sev in ("CRITICAL", "HIGH"):
-                risk_signals.append(f"{cve_id}: CVSS3 severity {sev} ({score_entry.get('score')})")
-
-        for ref in cve_data.get("references", []):
-            url = (ref.get("url") or "").lower()
-            name = (ref.get("name") or "").lower()
-            if any(kw in url or kw in name for kw in ("patch", "advisory", "vendor")):
-                risk_signals.append(f"{cve_id}: patch/advisory reference available")
-                break
-
+    # Layer 2 — derived from knowledge graph traversal
+    graph_context_signals: list[str] = []
     for cve_id, trace in cve_traces.items():
         has_capec = any(p.get("capec") for p in trace.get("paths", []))
         has_attack = any(p.get("attack") for p in trace.get("paths", []))
         if has_capec:
-            risk_signals.append(f"{cve_id}: mapped to CAPEC attack pattern(s)")
+            capecs = list({p["capec"] for p in trace["paths"] if p.get("capec")})
+            graph_context_signals.append(
+                f"{cve_id} → CAPEC mapping(s): {', '.join(capecs)}"
+            )
         if has_attack:
-            risk_signals.append(f"{cve_id}: potential ATT&CK technique mapping found")
+            attacks = list({p["attack"]["name"] for p in trace["paths"] if p.get("attack")})
+            graph_context_signals.append(
+                f"{cve_id} → possible ATT&CK technique(s): {', '.join(attacks)}"
+            )
+
+    # Layer 3 — prioritisation signals from scoring / patch data
+    prioritization_signals: list[str] = []
+    for cve_id, cve_data in cve_results.items():
+        for entry in cve_data.get("cvss3", []):
+            sev = (entry.get("severity") or "").upper()
+            if sev in ("CRITICAL", "HIGH"):
+                prioritization_signals.append(
+                    f"{cve_id}: CVSS3 {sev} ({entry.get('score')})"
+                )
+        for ref in cve_data.get("references", []):
+            url = (ref.get("url") or "").lower()
+            name = (ref.get("name") or "").lower()
+            if any(kw in url or kw in name for kw in ("patch", "advisory", "vendor")):
+                prioritization_signals.append(
+                    f"{cve_id}: patch/advisory reference available"
+                )
+                break
+
+    warnings: list[str] = []
+    limitations: list[str] = []
+
+    for trace in cve_traces.values():
         warnings.extend(trace.get("warnings", []))
 
     if not cves and not cwes:
@@ -122,11 +142,16 @@ def _assess(
             "No CVE or CWE identifiers found in alert text. "
             "Consider Mode B (semantic search) for entity-free alerts."
         )
-
     if not product_vulns and not cves:
         limitations.append(
             "No product/CPE vulnerabilities retrieved. "
             "Provide product_hint for CPE-based lookup."
         )
 
-    return risk_signals, warnings, limitations
+    return {
+        "observed_signals": observed_signals,
+        "graph_context_signals": graph_context_signals,
+        "prioritization_signals": prioritization_signals,
+        "warnings": warnings,
+        "limitations": limitations,
+    }

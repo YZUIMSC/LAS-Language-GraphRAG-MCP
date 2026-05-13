@@ -9,9 +9,15 @@ _BASE_CYPHER = (
     Path(__file__).parent.parent / "cypher" / "trace_cve_to_attack_graphker.cypher"
 ).read_text()
 
-# Candidate labels and relationships for ATT&CK nodes
 _ATTACK_LABELS = ["ATTACK", "Technique", "ATTACK_Technique", "Attack_Technique"]
 _ATTACK_RELS = ["Mapped_Attack", "MAPS_TO_ATTACK", "USES_ATTACK_TECHNIQUE", "mapsToTechnique", "RelatedTechnique"]
+
+_CONFIDENCE = "knowledge_graph_mapping"
+_LIMITATIONS = [
+    "This path represents a knowledge-graph mapping, not observed attacker behavior.",
+    "CAPEC/ATT&CK associations are derived from NVD/MITRE data and may not reflect "
+    "the specific exploitation technique used in this alert.",
+]
 
 
 def trace_cve_to_attack(client: Neo4jClient, cve_id: str) -> dict[str, Any]:
@@ -25,15 +31,6 @@ def trace_cve_to_attack(client: Neo4jClient, cve_id: str) -> dict[str, Any]:
         return {"found": False, "cve": cve_id, "paths": [], "warnings": []}
 
     capec_names = [r["capec"] for r in rows if r.get("capec")]
-    paths_base = [
-        {
-            "cwe": r.get("cwe"),
-            "cwe_name": r.get("cwe_name"),
-            "capec": r.get("capec"),
-            "capec_name": r.get("capec_name"),
-        }
-        for r in rows
-    ]
 
     warnings: list[str] = []
     attack_map: dict[str, dict] = {}
@@ -47,20 +44,47 @@ def trace_cve_to_attack(client: Neo4jClient, cve_id: str) -> dict[str, Any]:
             )
 
     paths = []
-    for p in paths_base:
-        capec = p.get("capec")
-        entry: dict[str, Any] = dict(p)
-        if capec and capec in attack_map:
-            entry["attack"] = attack_map[capec]
-        else:
-            entry["attack"] = None
-        paths.append(entry)
+    for r in rows:
+        path = _build_evidence_path(cve_id, r, attack_map)
+        paths.append(path)
 
     return {
         "found": True,
         "cve": cve_id,
         "paths": paths,
         "warnings": warnings,
+    }
+
+
+def _build_evidence_path(cve_id: str, row: dict, attack_map: dict) -> dict[str, Any]:
+    steps: list[dict[str, str]] = [{"label": "CVE", "id": cve_id}]
+
+    cwe = row.get("cwe")
+    if cwe:
+        steps.append({"relationship": "Problem_Type"})
+        steps.append({"label": "CWE", "id": cwe, "name": row.get("cwe_name") or ""})
+
+    capec = row.get("capec")
+    if capec:
+        steps.append({"relationship": "RelatedAttackPattern"})
+        steps.append({"label": "CAPEC", "id": capec, "name": row.get("capec_name") or ""})
+
+    attack = attack_map.get(capec) if capec else None
+    if attack:
+        steps.append({"relationship": attack["relation"]})
+        steps.append({"label": "ATTACK", "id": attack["id"], "name": attack["name"]})
+
+    return {
+        "source": cve_id,
+        "steps": steps,
+        "confidence": _CONFIDENCE,
+        "limitations": _LIMITATIONS,
+        # flat fields kept for backward compatibility
+        "cwe": cwe,
+        "cwe_name": row.get("cwe_name"),
+        "capec": capec,
+        "capec_name": row.get("capec_name"),
+        "attack": attack,
     }
 
 

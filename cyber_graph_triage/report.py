@@ -50,18 +50,20 @@ def format_triage_report(result: dict[str, Any]) -> str:
         lines.append(f"- **Published:** {data.get('published_date') or 'N/A'}")
         for entry in data.get("cvss3", []):
             lines.append(
-                f"- **CVSS3:** {entry.get('score')} ({entry.get('severity')}) — `{entry.get('vector')}`"
+                f"- **CVSS3:** {entry.get('score')} ({entry.get('severity')}) "
+                f"— `{entry.get('vector')}`"
             )
         lines.append(f"- **Related CWEs:** {', '.join(data.get('cwes', [])) or 'none'}")
         cpes = data.get("cpes", [])
         if cpes:
-            lines.append(f"- **Affected CPEs ({len(cpes)}):** {', '.join(cpes[:5])}" + (" ..." if len(cpes) > 5 else ""))
+            sample = ", ".join(cpes[:5])
+            suffix = " ..." if len(cpes) > 5 else ""
+            lines.append(f"- **Affected CPEs ({len(cpes)}):** {sample}{suffix}")
         refs = data.get("references", [])
         if refs:
             lines.append(f"- **References ({len(refs)}):**")
             for ref in refs[:5]:
-                url = ref.get("url") or ref.get("name") or ""
-                lines.append(f"  - {url}")
+                lines.append(f"  - {ref.get('url') or ref.get('name') or ''}")
         lines.append("")
 
     # CWE Context
@@ -81,7 +83,10 @@ def format_triage_report(result: dict[str, Any]) -> str:
         if related:
             lines.append(f"- **Related Weaknesses ({len(related)}):**")
             for r in related[:5]:
-                lines.append(f"  - [{r.get('nature')}] {r.get('target')} — {r.get('target_name') or ''}")
+                lines.append(
+                    f"  - [{r.get('nature')}] {r.get('target')} "
+                    f"— {r.get('target_name') or ''}"
+                )
         mitigations = data.get("mitigations", [])
         if mitigations:
             lines.append(f"- **Mitigations ({len(mitigations)}):**")
@@ -94,57 +99,100 @@ def format_triage_report(result: dict[str, Any]) -> str:
     if not evidence_paths:
         lines.append("No evidence paths found.")
     for path in evidence_paths:
-        parts = [f"CVE: {path.get('cve')}"]
-        if path.get("cwe"):
-            parts.append(f"CWE: {path.get('cwe')} ({path.get('cwe_name') or ''})")
-        if path.get("capec"):
-            parts.append(f"CAPEC: {path.get('capec')} ({path.get('capec_name') or ''})")
-        attack = path.get("attack")
-        if attack:
-            parts.append(
-                f"ATT&CK: {attack.get('id')} — {attack.get('name')} "
-                f"[via {attack.get('relation')}] *(possible mapping, not observed technique)*"
-            )
+        steps = path.get("steps", [])
+        if steps:
+            parts = _render_steps(steps)
         else:
-            parts.append("ATT&CK: not mapped")
-        lines.append("- " + " → ".join(parts))
+            parts = _render_flat_path(path)
+        lines.append(f"- {parts}")
+        limitations = path.get("limitations", [])
+        if limitations:
+            for lim in limitations:
+                lines.append(f"  - _{lim}_")
     lines.append("")
 
-    # Risk Signals
+    # Risk Signals — three layers
     _h2(lines, "Risk Signals")
-    risk_signals = assessment.get("risk_signals", [])
-    if risk_signals:
-        for sig in risk_signals:
-            lines.append(f"- {sig}")
+
+    observed = assessment.get("observed_signals", [])
+    graph_ctx = assessment.get("graph_context_signals", [])
+    priority = assessment.get("prioritization_signals", [])
+
+    if observed or graph_ctx or priority:
+        if observed:
+            lines.append("**Observed (from alert input):**")
+            for s in observed:
+                lines.append(f"- {s}")
+        if graph_ctx:
+            lines.append("**Graph context (knowledge-graph mapping):**")
+            for s in graph_ctx:
+                lines.append(f"- {s}")
+        if priority:
+            lines.append("**Prioritisation (CVSS / patch availability):**")
+            for s in priority:
+                lines.append(f"- {s}")
     else:
-        lines.append("No high-confidence risk signals identified from graph data.")
+        lines.append("No risk signals identified from graph data.")
     lines.append("")
 
     # Limitations
     _h2(lines, "Limitations")
     limitations = assessment.get("limitations", [])
     warnings = assessment.get("warnings", [])
-    all_notes = limitations + warnings
-    if all_notes:
-        for note in all_notes:
-            lines.append(f"- {note}")
-    else:
-        lines.append("No limitations noted.")
-    lines.append("- CAPEC/ATT&CK mappings indicate possible attack patterns, not confirmed observed techniques.")
+    for note in limitations + warnings:
+        lines.append(f"- {note}")
+    lines.append(
+        "- CAPEC/ATT&CK mappings indicate possible attack patterns, "
+        "not confirmed observed techniques."
+    )
     lines.append("- This report does not assert that an attack was successful.")
     lines.append("")
 
     # Recommended Next Actions
     _h2(lines, "Recommended Next Actions")
     lines.append("- Validate whether affected CPEs match assets in your environment.")
-    if any(data.get("found") for data in cve_results.values()):
+    if any(d.get("found") for d in cve_results.values()):
         lines.append("- Apply available patches or mitigations referenced above.")
     lines.append("- Cross-reference with SIEM/EDR telemetry for observed indicators.")
     if not cves and not cwes:
-        lines.append("- Run Mode B (semantic search) to find related vulnerabilities without explicit CVE/CWE IDs.")
+        lines.append(
+            "- Run Mode B (semantic search) to find related vulnerabilities "
+            "without explicit CVE/CWE IDs."
+        )
     lines.append("")
 
     return "\n".join(lines)
+
+
+def _render_steps(steps: list[dict]) -> str:
+    parts = []
+    for step in steps:
+        if "relationship" in step:
+            parts.append(f"─[{step['relationship']}]→")
+        else:
+            label = step.get("label", "")
+            id_ = step.get("id", "")
+            name = step.get("name", "")
+            node = f"{label}:{id_}"
+            if name and name != id_:
+                node += f" ({name})"
+            parts.append(node)
+    return " ".join(parts)
+
+
+def _render_flat_path(path: dict) -> str:
+    parts = [f"CVE:{path.get('cve', '?')}"]
+    if path.get("cwe"):
+        parts.append(f"─[Problem_Type]→ CWE:{path['cwe']}")
+    if path.get("capec"):
+        parts.append(f"─[RelatedAttackPattern]→ CAPEC:{path['capec']}")
+    attack = path.get("attack")
+    if attack:
+        parts.append(
+            f"─[{attack.get('relation')}]→ ATTACK:{attack.get('id')} "
+            f"({attack.get('name')})"
+        )
+    return " ".join(parts)
 
 
 def _h1(lines: list, text: str) -> None:

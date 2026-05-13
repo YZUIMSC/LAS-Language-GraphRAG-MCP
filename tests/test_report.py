@@ -7,7 +7,13 @@ def _minimal_result(**overrides):
         "input": {"alert_text": "test alert", "product_hint": None, "asset_hint": None},
         "extracted": {"cves": [], "cwes": [], "product_hint": None, "asset_hint": None},
         "results": {"cves": {}, "cve_traces": {}, "cwes": {}, "product_vulnerabilities": []},
-        "assessment": {"risk_signals": [], "warnings": [], "limitations": []},
+        "assessment": {
+            "observed_signals": [],
+            "graph_context_signals": [],
+            "prioritization_signals": [],
+            "warnings": [],
+            "limitations": [],
+        },
         "evidence_paths": [],
     }
     base.update(overrides)
@@ -45,11 +51,12 @@ def test_report_with_cve_not_found():
 
 
 def test_triage_result_schema_minimal():
-    """Verify the triage result dict has expected top-level keys."""
     result = _minimal_result()
-    assert "mode" in result
     assert result["mode"] == "SOC_TRIAGE"
     assert "extracted" in result
     assert "results" in result
-    assert "assessment" in result
     assert "evidence_paths" in result
+    assessment = result["assessment"]
+    assert "observed_signals" in assessment
+    assert "graph_context_signals" in assessment
+    assert "prioritization_signals" in assessment

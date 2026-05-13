@@ -42,11 +42,12 @@ async def trace_cve_to_attack(cve_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def lookup_cpe_vulnerabilities(keyword: str) -> dict[str, Any]:
+async def lookup_cpe_vulnerabilities(keyword: str, limit: int = 100) -> dict[str, Any]:
     """Find CVEs affecting CPE URIs that contain a product or vendor keyword.
-    Results are sorted by CVSS score descending. Example keywords: apache:struts, cisco, openssl."""
-    results = _lookup_cpe(_client, keyword)
-    return {"keyword": keyword, "count": len(results), "results": results}
+    Results are sorted by CVSS score descending. Keyword must be at least 3 characters.
+    Use specific terms e.g. 'apache:struts', 'cisco:ios_xr', 'openssl'.
+    Returns truncated=true when there are more results than the limit."""
+    return _lookup_cpe(_client, keyword, limit=limit)
 
 
 @mcp.tool()
