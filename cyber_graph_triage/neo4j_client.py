@@ -17,8 +17,9 @@ class Neo4jClient:
         except ImportError as exc:
             raise RuntimeError("neo4j package is not installed.") from exc
 
-        cfg = get_neo4j_config()
+        cfg = None
         try:
+            cfg = get_neo4j_config()
             self._driver = GraphDatabase.driver(
                 cfg["uri"],
                 auth=(cfg["user"], cfg["password"]),
@@ -26,8 +27,9 @@ class Neo4jClient:
             self._driver.verify_connectivity()
         except Exception as exc:
             self._driver = None
+            uri = cfg["uri"] if cfg is not None else "<invalid NEO4J_URI>"
             raise RuntimeError(
-                f"Cannot connect to Neo4j at {cfg['uri']}: {exc}"
+                f"Cannot connect to Neo4j at {uri}: {exc}"
             ) from exc
 
     def run(self, query: str, **params: Any) -> list[dict[str, Any]]:

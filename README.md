@@ -66,6 +66,15 @@ NEO4J_PASSWORD=change-me
 NEO4J_DATABASE=neo4j
 ```
 
+`NEO4J_URI` is passed directly to the official Neo4j Python driver. Supported
+schemes are `bolt://`, `bolt+s://`, `bolt+ssc://`, `neo4j://`, `neo4j+s://`,
+and `neo4j+ssc://`. Do not set `NEO4J_URI` to `ws://` or `wss://`; the Python
+driver does not accept WebSocket URIs.
+
+For a remote Bolt-over-WebSocket endpoint, use the local bridge described in
+[Experimental Bolt-over-WebSocket Bridge](#experimental-bolt-over-websocket-bridge).
+In that mode, `NEO4J_URI` still points to a local `bolt://` listener.
+
 > Never commit real credentials to the repo.
 
 ---
@@ -105,6 +114,52 @@ python server.py --transport sse --host 0.0.0.0 --port 8080
 | `lookup_cpe_vulnerabilities` | CVEs by product/vendor CPE keyword |
 | `triage_alert` | Full SOC triage from alert text |
 | `schema_introspection` | Debug: list Neo4j labels and relationship types |
+
+---
+
+## Experimental Bolt-over-WebSocket Bridge
+
+This repo includes an experimental local TCP-to-WebSocket bridge for deployments
+where Neo4j is reachable through a WebSocket endpoint, such as a Cloudflare or
+Nginx setup originally intended for Neo4j Browser.
+
+The bridge keeps the Python Neo4j driver on a normal local Bolt TCP URI:
+
+```
+NEO4J_URI=bolt://127.0.0.1:17687
+NEO4J_WS_BRIDGE_TARGET=wss://graphker.lab.114514.my.id:443/
+NEO4J_WS_BRIDGE_LISTEN_HOST=127.0.0.1
+NEO4J_WS_BRIDGE_LISTEN_PORT=17687
+```
+
+Start the bridge first:
+
+```bash
+uv run neo4j-ws-bolt-bridge
+```
+
+Then run the MCP server or CLI as usual:
+
+```bash
+uv run python -m cyber_graph_triage.cli schema
+uv run python server.py --transport stdio
+```
+
+Data flow:
+
+```
+Neo4j Python driver
+  -> local TCP 127.0.0.1:17687
+  -> cyber_graph_triage.ws_bolt_bridge
+  -> remote wss:// endpoint
+  -> WebSocket-to-Bolt proxy
+  -> Neo4j Bolt endpoint
+```
+
+This bridge assumes the remote WebSocket endpoint forwards binary WebSocket
+payloads directly to Neo4j Bolt. If your gateway requires a specific path,
+Cloudflare Access token, custom headers, or WebSocket subprotocol, the current
+bridge must be extended before it will work.
 
 ---
 
@@ -199,6 +254,7 @@ server.py                          # MCP server entrypoint (FastMCP)
 cyber_graph_triage/
   config.py                        # Env var loading
   neo4j_client.py                  # Neo4j driver wrapper (lazy init)
+  ws_bolt_bridge.py                # Experimental local TCP-to-WebSocket bridge
   extractors.py                    # CVE/CWE/CPE regex extractors
   schemas.py                       # Pydantic models
   triage_service.py                # Orchestrates triage flow
@@ -216,8 +272,10 @@ cyber_graph_triage/
     trace_cve_to_attack_graphker.cypher
     lookup_cpe_vulnerabilities_graphker.cypher
 tests/
+  test_config.py
   test_extractors.py
   test_report.py
+  test_ws_bolt_bridge.py
 ```
 
 ---
@@ -229,3 +287,6 @@ tests/
 - **Asset context** — no Asset nodes in the base schema; CPE-based lookup requires a `product_hint`.
 - **No attack success assertion** — CAPEC/ATT&CK mappings indicate *possible* attack patterns, not confirmed observed techniques.
 - **CPE keyword search** is substring-based; a graph with millions of CPE nodes may need indexing on `cpe.uri`.
+- **WebSocket bridge is experimental** — it is a local transport adapter for
+  environments that already expose raw Bolt bytes through WebSocket binary
+  frames. It is not a replacement for the Neo4j Python driver.
