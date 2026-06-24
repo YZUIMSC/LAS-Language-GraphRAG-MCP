@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from cyber_graph_triage.bridge_manager import auto_start_ws_bridge_from_env
 from cyber_graph_triage.neo4j_client import Neo4jClient
 from cyber_graph_triage.tools.lookup_cve import lookup_cve as _lookup_cve
 from cyber_graph_triage.tools.lookup_cwe import lookup_cwe as _lookup_cwe
@@ -117,9 +118,10 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    if args.transport == "sse":
-        mcp_server = mcp._mcp_server  # noqa: SLF001
-        starlette_app = create_starlette_app(mcp_server, debug=args.debug)
-        uvicorn.run(starlette_app, host=args.host, port=args.port)
-    else:
-        mcp.run(transport="stdio")
+    with auto_start_ws_bridge_from_env():
+        if args.transport == "sse":
+            mcp_server = mcp._mcp_server  # noqa: SLF001
+            starlette_app = create_starlette_app(mcp_server, debug=args.debug)
+            uvicorn.run(starlette_app, host=args.host, port=args.port)
+        else:
+            mcp.run(transport="stdio")

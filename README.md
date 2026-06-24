@@ -126,23 +126,25 @@ Nginx setup originally intended for Neo4j Browser.
 The bridge keeps the Python Neo4j driver on a normal local Bolt TCP URI:
 
 ```
-NEO4J_URI=bolt://127.0.0.1:17687
 NEO4J_WS_BRIDGE_TARGET=wss://graphker.lab.114514.my.id:443/
 NEO4J_WS_BRIDGE_LISTEN_HOST=127.0.0.1
 NEO4J_WS_BRIDGE_LISTEN_PORT=17687
 ```
 
-Start the bridge first:
-
-```bash
-uv run neo4j-ws-bolt-bridge
-```
-
-Then run the MCP server or CLI as usual:
+When `NEO4J_WS_BRIDGE_TARGET` is set, the MCP server and CLI start the bridge
+automatically, rewrite `NEO4J_URI` in the current process to the local bridge
+listener, and shut the bridge down when the process exits. Run the MCP server
+or CLI as usual:
 
 ```bash
 uv run python -m cyber_graph_triage.cli schema
 uv run python server.py --transport stdio
+```
+
+For debugging, the bridge can still be started manually:
+
+```bash
+uv run neo4j-ws-bolt-bridge
 ```
 
 Data flow:
@@ -160,6 +162,26 @@ This bridge assumes the remote WebSocket endpoint forwards binary WebSocket
 payloads directly to Neo4j Bolt. If your gateway requires a specific path,
 Cloudflare Access token, custom headers, or WebSocket subprotocol, the current
 bridge must be extended before it will work.
+
+### Docker Compose
+
+Direct Bolt mode is unchanged:
+
+```bash
+docker compose up -d --build cyber-graph-triage
+```
+
+For WebSocket bridge mode, set `NEO4J_WS_BRIDGE_TARGET` and start the same
+service. The Python server process starts the bridge automatically and rewrites
+`NEO4J_URI` inside the process to the local bridge listener:
+
+```bash
+NEO4J_WS_BRIDGE_TARGET=wss://graphker.lab.114514.my.id:443/ \
+docker compose up -d --build cyber-graph-triage
+```
+
+No separate Compose service is required. If `NEO4J_WS_BRIDGE_TARGET` is unset,
+the service uses `NEO4J_URI` normally.
 
 ---
 

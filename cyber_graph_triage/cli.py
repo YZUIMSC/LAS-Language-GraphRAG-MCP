@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+from .bridge_manager import auto_start_ws_bridge_from_env
 from .neo4j_client import Neo4jClient
 from .tools.lookup_cve import lookup_cve
 from .tools.lookup_cwe import lookup_cwe
@@ -98,45 +99,46 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    client = Neo4jClient()
+    with auto_start_ws_bridge_from_env():
+        client = Neo4jClient()
 
-    try:
-        if args.cmd == "triage":
-            result = triage_alert(
-                client,
-                args.text,
-                product_hint=args.product_hint,
-                asset_hint=args.asset_hint,
-                include_report=args.report,
-            )
-            _out(result, as_report=args.report)
+        try:
+            if args.cmd == "triage":
+                result = triage_alert(
+                    client,
+                    args.text,
+                    product_hint=args.product_hint,
+                    asset_hint=args.asset_hint,
+                    include_report=args.report,
+                )
+                _out(result, as_report=args.report)
 
-        elif args.cmd == "lookup-cve":
-            _out(lookup_cve(client, args.cve_id))
+            elif args.cmd == "lookup-cve":
+                _out(lookup_cve(client, args.cve_id))
 
-        elif args.cmd == "lookup-cwe":
-            _out(lookup_cwe(client, args.cwe_id))
+            elif args.cmd == "lookup-cwe":
+                _out(lookup_cwe(client, args.cwe_id))
 
-        elif args.cmd == "lookup-cpe":
-            _out(lookup_cpe_vulnerabilities(client, args.keyword))
+            elif args.cmd == "lookup-cpe":
+                _out(lookup_cpe_vulnerabilities(client, args.keyword))
 
-        elif args.cmd == "trace":
-            _out(trace_cve_to_attack(client, args.cve_id))
+            elif args.cmd == "trace":
+                _out(trace_cve_to_attack(client, args.cve_id))
 
-        elif args.cmd == "schema":
-            _out(schema_introspection(client))
+            elif args.cmd == "schema":
+                _out(schema_introspection(client))
 
-        elif args.cmd == "import-cwe-chain-components":
-            _cmd_import(client, args)
+            elif args.cmd == "import-cwe-chain-components":
+                _cmd_import(client, args)
 
-        elif args.cmd == "validate-cwe-chain":
-            _cmd_validate(client, args)
+            elif args.cmd == "validate-cwe-chain":
+                _cmd_validate(client, args)
 
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        client.close()
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            client.close()
 
 
 def _cmd_import(client: Neo4jClient, args: argparse.Namespace) -> None:

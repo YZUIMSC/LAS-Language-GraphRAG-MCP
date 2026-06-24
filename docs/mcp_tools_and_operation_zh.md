@@ -76,21 +76,27 @@ NEO4J_URI=bolt://127.0.0.1:17687
 `.env` 範例：
 
 ```text
-NEO4J_URI=bolt://127.0.0.1:17687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=neo4j
 NEO4J_WS_BRIDGE_TARGET=wss://graphker.lab.114514.my.id:443/
 NEO4J_WS_BRIDGE_LISTEN_HOST=127.0.0.1
+NEO4J_WS_BRIDGE_CONNECT_HOST=127.0.0.1
 NEO4J_WS_BRIDGE_LISTEN_PORT=17687
+NEO4J_WS_BRIDGE_ENABLED=true
 ```
 
-啟動順序：
+當 `NEO4J_WS_BRIDGE_TARGET` 有值時，MCP server 與 CLI 會自動啟動 bridge，並在目前 process 中將 `NEO4J_URI` 改為 `bolt://127.0.0.1:<NEO4J_WS_BRIDGE_LISTEN_PORT>`。因此一般使用不需要手動先執行 bridge，只要照原本方式啟動即可：
+
+```bash
+uv run python -m cyber_graph_triage.cli schema
+uv run python server.py --transport stdio
+```
+
+若需要除錯或單獨驗證 bridge，也可以手動啟動：
 
 ```bash
 uv run neo4j-ws-bolt-bridge
-uv run python -m cyber_graph_triage.cli schema
-uv run python server.py --transport stdio
 ```
 
 資料流如下：
@@ -105,6 +111,21 @@ Neo4j Python driver
 ```
 
 目前已用 `schema_introspection` 與 `lookup-cve CVE-2023-5457` 驗證此路徑可以完成查詢。需要注意的是，此方案假設遠端 WebSocket endpoint 會將 WebSocket binary payload 原樣轉送到 Neo4j Bolt。若遠端需要額外 path、header、subprotocol 或 Cloudflare Access token，目前 bridge 尚未加入這些擴充設定。
+
+Docker 使用方式相同。Python server process 會檢查 `NEO4J_WS_BRIDGE_TARGET`，如果該變數有值，就會先在同一個 container 內啟動 bridge，並自動將 process 內部的 `NEO4J_URI` 改為 `bolt://127.0.0.1:<NEO4J_WS_BRIDGE_LISTEN_PORT>`。因此不需要額外啟動第二個 Compose service。
+
+Docker Compose 範例：
+
+```bash
+NEO4J_WS_BRIDGE_TARGET=wss://graphker.lab.114514.my.id:443/ \
+docker compose up -d --build cyber-graph-triage
+```
+
+如果 `NEO4J_WS_BRIDGE_TARGET` 未設定，Docker container 會維持原本行為，直接使用 `NEO4J_URI` 連線。若需要明確停用自動 bridge，可設定：
+
+```text
+NEO4J_WS_BRIDGE_ENABLED=false
+```
 
 如果 Neo4j 無法連線，多數工具會回傳結構化錯誤，而不是直接讓 MCP server 崩潰。例如 `lookup_cve` 會回傳 `found: false` 與 `error` 欄位。
 
