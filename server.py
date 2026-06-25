@@ -20,6 +20,8 @@ from cyber_graph_triage.tools.lookup_cwe import lookup_cwe as _lookup_cwe
 from cyber_graph_triage.tools.trace_cve_to_attack import trace_cve_to_attack as _trace
 from cyber_graph_triage.tools.lookup_cpe_vulnerabilities import lookup_cpe_vulnerabilities as _lookup_cpe
 from cyber_graph_triage.tools.schema_introspection import schema_introspection as _schema
+from cyber_graph_triage.tools.get_schema import get_schema as _get_schema
+from cyber_graph_triage.tools.execute_cypher import execute_cypher as _execute_cypher
 from cyber_graph_triage.triage_service import triage_alert as _triage_alert
 
 mcp = FastMCP("cyber-graph-triage")
@@ -74,6 +76,37 @@ async def triage_alert(
 async def schema_introspection() -> dict[str, Any]:
     """Return Neo4j labels and relationship types to debug GraphKer schema compatibility."""
     return _schema(_client)
+
+
+@mcp.tool()
+async def get_schema() -> dict[str, Any]:
+    """Return the full Neo4j graph schema: node labels with their property keys,
+    and relationship patterns (from_label)-[:TYPE]->(to_label).
+
+    Call this first before writing any Cypher query so you know the exact label names,
+    property keys, and valid traversal paths. All identifiers are case-sensitive."""
+    return _get_schema(_client)
+
+
+@mcp.tool()
+async def execute_cypher(
+    query: str,
+    params: dict[str, Any] | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Execute a read-only Cypher query against the Neo4j knowledge graph and return results.
+
+    Use this to verify your Cypher syntax before embedding it in analysis,
+    or to perform ad-hoc graph queries not covered by the other tools.
+
+    Args:
+        query:  A Cypher MATCH/RETURN query. Write operations (CREATE, MERGE, SET,
+                DELETE, etc.) are rejected.
+        params: Optional named parameters referenced in the query (e.g. {cve_id: "CVE-2021-44228"}).
+        limit:  Maximum number of rows to return (1–500, default 100).
+
+    Returns a dict with keys: rows, count, truncated, truncated_at."""
+    return _execute_cypher(_client, query, params=params, limit=limit)
 
 
 def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:

@@ -27,6 +27,8 @@ _EXPECTED_TOOLS = {
     "lookup_cpe_vulnerabilities",
     "triage_alert",
     "schema_introspection",
+    "get_schema",
+    "execute_cypher",
 }
 
 
@@ -171,3 +173,139 @@ async def test_schema_introspection_no_neo4j():
             assert "error" in data or "labels" in data, (
                 "Expected either 'error' (no Neo4j) or 'labels' (connected)"
             )
+
+
+# ---------------------------------------------------------------------------
+# get_schema — returns full schema or graceful error; never crashes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_schema_structure():
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            data = _parse(await session.call_tool("get_schema", {}))
+            assert isinstance(data, dict)
+            if "error" in data:
+                # Neo4j unavailable — graceful error is acceptable
+                assert isinstance(data["error"], str)
+            else:
+                assert "node_labels" in data, "Expected node_labels in schema"
+                assert "node_properties" in data, "Expected node_properties in schema"
+                assert "relationship_patterns" in data, "Expected relationship_patterns in schema"
+                assert "relationship_properties" in data, "Expected relationship_properties in schema"
+                assert "usage_hint" in data, "Expected usage_hint in schema"
+                assert isinstance(data["node_labels"], list)
+                assert isinstance(data["node_properties"], dict)
+                assert isinstance(data["relationship_patterns"], list)
+                assert isinstance(data["relationship_properties"], dict)
+                # Each relationship pattern must have the required keys
+                for pat in data["relationship_patterns"]:
+                    assert "from" in pat and "type" in pat and "to" in pat
+
+
+@pytest.mark.asyncio
+async def test_get_schema_with_neo4j():
+    """When Neo4j is connected, schema must include the known GraphKer labels."""
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            data = _parse(await session.call_tool("get_schema", {}))
+            if "error" in data:
+                pytest.skip("Neo4j not available")
+            labels = data["node_labels"]
+            for expected in ("CVE", "CWE", "CAPEC", "ATTACK", "CPE"):
+                assert expected in labels, f"GraphKer label '{expected}' missing from schema"
+            # node_properties must map every label to a list (possibly empty)
+            for label in labels:
+                assert label in data["node_properties"]
+                assert isinstance(data["node_properties"][label], list)
+
+
+# ---------------------------------------------------------------------------
+# execute_cypher — write guard, empty query, read query (with/without Neo4j)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_execute_cypher_blocks_write_operations():
+    """Write operations must be rejected regardless of Neo4j availability."""
+    write_queries = [
+        "CREATE (n:Test {x:1}) RETURN n",
+        "MERGE (n:Test {x:1}) RETURN n",
+        "MATCH (n) SET n.x = 1",
+        "MATCH (n) DELETE n",
+        "MATCH (n) DETACH DELETE n",
+    ]
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            for q in write_queries:
+                data = _parse(await session.call_tool("execute_cypher", {"query": q}))
+                assert "error" in data, f"Expected error for write query: {q}"
+                assert "not allowed" in data["error"].lower() or "write" in data["error"].lower(), (
+                    f"Error message should mention write restriction, got: {data['error']}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_execute_cypher_rejects_empty_query():
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            data = _parse(await session.call_tool("execute_cypher", {"query": "   "}))
+            assert "error" in data
+
+
+@pytest.mark.asyncio
+async def test_execute_cypher_read_query():
+    """A valid read query returns rows list; errors gracefully when Neo4j is down."""
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            data = _parse(await session.call_tool(
+                "execute_cypher",
+                {"query": "MATCH (n:CVE) RETURN n.id AS id LIMIT 5"},
+            ))
+            assert isinstance(data, dict)
+            if "error" in data:
+                # Neo4j unavailable
+                assert isinstance(data["error"], str)
+            else:
+                assert "rows" in data
+                assert "count" in data
+                assert "truncated" in data
+                assert isinstance(data["rows"], list)
+                assert data["count"] == len(data["rows"])
+
+
+@pytest.mark.asyncio
+async def test_execute_cypher_limit_respected():
+    """Limit parameter must be honoured; result count must not exceed it."""
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            data = _parse(await session.call_tool(
+                "execute_cypher",
+                {"query": "MATCH (n) RETURN n LIMIT 200", "limit": 10},
+            ))
+            if "error" in data:
+                pytest.skip("Neo4j not available")
+            assert data["count"] <= 10
+
+
+@pytest.mark.asyncio
+async def test_execute_cypher_with_params():
+    """Named parameters in the query should be substituted correctly."""
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            data = _parse(await session.call_tool(
+                "execute_cypher",
+                {
+                    "query": "MATCH (n:CVE {id: $cve_id}) RETURN n.id AS id LIMIT 1",
+                    "params": {"cve_id": "CVE-2021-44228"},
+                },
+            ))
+            assert isinstance(data, dict)
+            if "error" not in data:
+                assert "rows" in data

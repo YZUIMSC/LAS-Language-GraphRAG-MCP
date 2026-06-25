@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import sys
 import hashlib
 import os
 import secrets
@@ -222,7 +223,7 @@ async def handle_client(
             _ws_to_tcp(ws_reader, ws_writer, tcp_writer),
         )
     except Exception as exc:
-        print(f"Bridge connection failed for {peer}: {exc}", flush=True)
+        print(f"Bridge connection failed for {peer}: {exc}", file=sys.stderr, flush=True)
     finally:
         tcp_writer.close()
         await tcp_writer.wait_closed()
@@ -241,6 +242,7 @@ async def run_bridge(listen_host: str, listen_port: int, target_uri: str) -> Non
     addresses = ", ".join(str(sock.getsockname()) for sock in server.sockets or [])
     print(
         f"Listening on {addresses}; forwarding Bolt over WebSocket to {target.uri}",
+        file=sys.stderr,
         flush=True,
     )
     async with server:
