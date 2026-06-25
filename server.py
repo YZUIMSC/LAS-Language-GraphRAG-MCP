@@ -80,11 +80,13 @@ async def schema_introspection() -> dict[str, Any]:
 
 @mcp.tool()
 async def get_schema() -> dict[str, Any]:
-    """Return the full Neo4j graph schema: node labels with their property keys,
-    and relationship patterns (from_label)-[:TYPE]->(to_label).
+    """Return a sampled schema view of the Neo4j graph: observed node labels with
+    their property keys, and relationship patterns (from_label)-[:TYPE]->(to_label).
 
-    Call this first before writing any Cypher query so you know the exact label names,
-    property keys, and valid traversal paths. All identifiers are case-sensitive."""
+    This is a best-effort sampling from the live graph, NOT an authoritative schema.
+    Property keys are collected from up to 5 nodes per label; sparse properties may
+    be absent. Call this before writing Cypher to orient yourself, but treat the
+    result as a guide rather than a guarantee. All identifiers are case-sensitive."""
     return _get_schema(_client)
 
 
@@ -99,13 +101,17 @@ async def execute_cypher(
     Use this to verify your Cypher syntax before embedding it in analysis,
     or to perform ad-hoc graph queries not covered by the other tools.
 
+    Always returns a dict — never raises. On failure the dict contains:
+      error (str), error_type (str, e.g. CypherSyntaxError), query (str).
+    On success: rows (list), count (int), truncated (bool), truncated_at (int|null).
+
     Args:
         query:  A Cypher MATCH/RETURN query. Write operations (CREATE, MERGE, SET,
                 DELETE, etc.) are rejected.
-        params: Optional named parameters referenced in the query (e.g. {cve_id: "CVE-2021-44228"}).
-        limit:  Maximum number of rows to return (1–500, default 100).
-
-    Returns a dict with keys: rows, count, truncated, truncated_at."""
+        params: Optional named parameters referenced in the query
+                (e.g. {"cve_id": "CVE-2021-44228"}).
+        limit:  Maximum rows to return (1–500, default 100). Enforced via driver-level
+                lazy fetching; does not require the query itself to have LIMIT."""
     return _execute_cypher(_client, query, params=params, limit=limit)
 
 

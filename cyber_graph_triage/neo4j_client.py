@@ -32,12 +32,24 @@ class Neo4jClient:
                 f"Cannot connect to Neo4j at {uri}: {exc}"
             ) from exc
 
-    def run(self, query: str, **params: Any) -> list[dict[str, Any]]:
+    def run(
+        self,
+        query: str,
+        fetch_limit: int | None = None,
+        **params: Any,
+    ) -> list[dict[str, Any]]:
         self._ensure_driver()
         cfg = get_neo4j_config()
         with self._driver.session(database=cfg["database"]) as session:
             result = session.run(query, **params)
-            return [dict(record) for record in result]
+            if fetch_limit is None:
+                return [dict(record) for record in result]
+            rows: list[dict[str, Any]] = []
+            for record in result:
+                rows.append(dict(record))
+                if len(rows) >= fetch_limit:
+                    break
+            return rows
 
     def close(self) -> None:
         if self._driver:

@@ -14,10 +14,16 @@ LIMIT 200
 
 
 def get_schema(client: Neo4jClient) -> dict[str, Any]:
-    """Return node labels with their property keys and relationship patterns.
+    """Return a sampled schema view: node labels with observed property keys and
+    relationship patterns discovered from the live graph.
 
-    Designed to give an AI agent enough context to write correct Cypher queries
-    against this graph without guessing label names, property keys, or relationship types.
+    IMPORTANT — this is a best-effort sampling, not an authoritative schema:
+    - Property keys are collected by sampling up to 5 nodes per label; sparse
+      or rarely-populated properties may not appear.
+    - Relationship patterns are sampled from live edges; low-frequency patterns
+      may be missing.
+    - Multi-label nodes are represented only by their first label in patterns.
+    Use as orientation before writing Cypher, not as a guarantee of completeness.
     """
     try:
         label_rows = client.run("CALL db.labels()")
@@ -25,11 +31,16 @@ def get_schema(client: Neo4jClient) -> dict[str, Any]:
     except RuntimeError as exc:
         return {"error": str(exc)}
 
-    # Sample property keys for each label (one node is enough to learn the schema)
+    # Union property keys across up to 5 sampled nodes per label.
+    # A single query per label keeps the total query count the same as before
+    # while covering more of the property space than a single-node sample.
     node_properties: dict[str, list[str]] = {}
     for label in labels:
         try:
-            rows = client.run(f"MATCH (n:`{label}`) RETURN keys(n) AS props LIMIT 1")
+            rows = client.run(
+                f"MATCH (n:`{label}`) WITH n LIMIT 5 "
+                f"UNWIND keys(n) AS prop RETURN collect(DISTINCT prop) AS props"
+            )
             node_properties[label] = sorted(rows[0].get("props") or []) if rows else []
         except Exception:
             node_properties[label] = []
@@ -49,18 +60,19 @@ def get_schema(client: Neo4jClient) -> dict[str, Any]:
     except Exception:
         pass
 
-    # Also get relationship property keys (sample once per type)
     try:
         rel_type_rows = client.run("CALL db.relationshipTypes()")
         rel_types = [r["relationshipType"] for r in rel_type_rows if r.get("relationshipType")]
     except Exception:
         rel_types = list({p["type"] for p in rel_patterns})
 
+    # Union relationship property keys across up to 5 sampled edges per type.
     rel_properties: dict[str, list[str]] = {}
     for rtype in rel_types:
         try:
             rows = client.run(
-                f"MATCH ()-[r:`{rtype}`]->() RETURN keys(r) AS props LIMIT 1"
+                f"MATCH ()-[r:`{rtype}`]->() WITH r LIMIT 5 "
+                f"UNWIND keys(r) AS prop RETURN collect(DISTINCT prop) AS props"
             )
             rel_properties[rtype] = sorted(rows[0].get("props") or []) if rows else []
         except Exception:
@@ -71,9 +83,10 @@ def get_schema(client: Neo4jClient) -> dict[str, Any]:
         "node_properties": node_properties,
         "relationship_patterns": rel_patterns,
         "relationship_properties": rel_properties,
-        "usage_hint": (
-            "Use node_properties to know which property keys exist on each label. "
-            "Use relationship_patterns to know valid (from)-[:TYPE]->(to) traversal paths. "
+        "sampling_note": (
+            "sampled: true — property keys and relationship patterns are observed from "
+            "live graph samples (up to 5 nodes/edges per type). "
+            "Sparse properties and low-frequency relationships may be absent. "
             "All identifiers are case-sensitive in Cypher."
         ),
     }

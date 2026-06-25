@@ -176,7 +176,7 @@ async def test_schema_introspection_no_neo4j():
 
 
 # ---------------------------------------------------------------------------
-# get_schema — returns full schema or graceful error; never crashes
+# get_schema — returns sampled schema or graceful error; never crashes
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -194,11 +194,15 @@ async def test_get_schema_structure():
                 assert "node_properties" in data, "Expected node_properties in schema"
                 assert "relationship_patterns" in data, "Expected relationship_patterns in schema"
                 assert "relationship_properties" in data, "Expected relationship_properties in schema"
-                assert "usage_hint" in data, "Expected usage_hint in schema"
+                assert "sampling_note" in data, "Expected sampling_note disclaimer in schema"
                 assert isinstance(data["node_labels"], list)
                 assert isinstance(data["node_properties"], dict)
                 assert isinstance(data["relationship_patterns"], list)
                 assert isinstance(data["relationship_properties"], dict)
+                # sampling_note must explicitly signal this is sampled, not authoritative
+                assert "sampled" in data["sampling_note"].lower(), (
+                    "sampling_note should mention 'sampled' to set honest expectations"
+                )
                 # Each relationship pattern must have the required keys
                 for pat in data["relationship_patterns"]:
                     assert "from" in pat and "type" in pat and "to" in pat
@@ -228,7 +232,8 @@ async def test_get_schema_with_neo4j():
 
 @pytest.mark.asyncio
 async def test_execute_cypher_blocks_write_operations():
-    """Write operations must be rejected regardless of Neo4j availability."""
+    """Write operations must be rejected regardless of Neo4j availability.
+    Error response must include error, error_type, and query fields."""
     write_queries = [
         "CREATE (n:Test {x:1}) RETURN n",
         "MERGE (n:Test {x:1}) RETURN n",
@@ -242,6 +247,9 @@ async def test_execute_cypher_blocks_write_operations():
             for q in write_queries:
                 data = _parse(await session.call_tool("execute_cypher", {"query": q}))
                 assert "error" in data, f"Expected error for write query: {q}"
+                assert "error_type" in data, f"Expected error_type field for write query: {q}"
+                assert "query" in data, f"Expected query field echoed back for: {q}"
+                assert data["error_type"] == "WriteOperationNotAllowed"
                 assert "not allowed" in data["error"].lower() or "write" in data["error"].lower(), (
                     f"Error message should mention write restriction, got: {data['error']}"
                 )
@@ -254,6 +262,31 @@ async def test_execute_cypher_rejects_empty_query():
             await session.initialize()
             data = _parse(await session.call_tool("execute_cypher", {"query": "   "}))
             assert "error" in data
+            assert "error_type" in data
+            assert data["error_type"] == "EmptyQuery"
+
+
+@pytest.mark.asyncio
+async def test_execute_cypher_error_is_structured():
+    """Any query failure must return a structured dict, never crash the MCP tool.
+    Error dict must contain: error (str), error_type (str), query (str).
+    When Neo4j is unavailable, connection error is the expected failure path."""
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            # This query will either fail with a connection error (no Neo4j)
+            # or a CypherSyntaxError (Neo4j up but query is intentionally malformed).
+            data = _parse(await session.call_tool(
+                "execute_cypher",
+                {"query": "THIS IS NOT VALID CYPHER !!!"},
+            ))
+            assert isinstance(data, dict), "Tool must never raise — always return a dict"
+            assert not data.get("rows"), "Invalid Cypher must not return rows"
+            assert "error" in data, "Structured error must have 'error' key"
+            assert "error_type" in data, "Structured error must have 'error_type' key"
+            assert "query" in data, "Structured error must echo back 'query'"
+            assert isinstance(data["error"], str) and data["error"]
+            assert isinstance(data["error_type"], str) and data["error_type"]
 
 
 @pytest.mark.asyncio
@@ -268,8 +301,9 @@ async def test_execute_cypher_read_query():
             ))
             assert isinstance(data, dict)
             if "error" in data:
-                # Neo4j unavailable
-                assert isinstance(data["error"], str)
+                # Neo4j unavailable — must still be structured
+                assert "error_type" in data
+                assert "query" in data
             else:
                 assert "rows" in data
                 assert "count" in data
@@ -280,17 +314,21 @@ async def test_execute_cypher_read_query():
 
 @pytest.mark.asyncio
 async def test_execute_cypher_limit_respected():
-    """Limit parameter must be honoured; result count must not exceed it."""
+    """Limit parameter must be honoured; result count must not exceed it.
+    truncated flag must reflect whether more rows exist beyond the limit."""
     async with stdio_client(_PARAMS) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             data = _parse(await session.call_tool(
                 "execute_cypher",
-                {"query": "MATCH (n) RETURN n LIMIT 200", "limit": 10},
+                {"query": "MATCH (n:CVE) RETURN n.Name AS id", "limit": 10},
             ))
             if "error" in data:
                 pytest.skip("Neo4j not available")
             assert data["count"] <= 10
+            # Graph has many CVE nodes — truncated must be True when limit < total
+            assert data["truncated"] is True, "Expected truncated=True for limit=10 on CVE nodes"
+            assert data["truncated_at"] == 10
 
 
 @pytest.mark.asyncio
@@ -302,10 +340,13 @@ async def test_execute_cypher_with_params():
             data = _parse(await session.call_tool(
                 "execute_cypher",
                 {
-                    "query": "MATCH (n:CVE {id: $cve_id}) RETURN n.id AS id LIMIT 1",
+                    "query": "MATCH (n:CVE {Name: $cve_id}) RETURN n.Name AS id LIMIT 1",
                     "params": {"cve_id": "CVE-2021-44228"},
                 },
             ))
             assert isinstance(data, dict)
-            if "error" not in data:
-                assert "rows" in data
+            if "error" in data:
+                pytest.skip("Neo4j not available")
+            assert "rows" in data
+            assert data["count"] == 1
+            assert data["rows"][0]["id"] == "CVE-2021-44228"
