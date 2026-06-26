@@ -164,7 +164,9 @@ NEO4J_WS_BRIDGE_ENABLED=false
 
 ## 4. MCP 工具總覽
 
-此 MCP server 對外提供六個工具：
+此 MCP server 對外提供八個工具，分為兩類：
+
+**SOC Triage（Mode A — 固定 Cypher 查詢）**
 
 | 工具 | 主要用途 |
 |---|---|
@@ -173,7 +175,14 @@ NEO4J_WS_BRIDGE_ENABLED=false
 | `trace_cve_to_attack` | 追蹤 CVE -> CWE -> CAPEC -> ATT&CK 的知識圖譜 evidence path |
 | `lookup_cpe_vulnerabilities` | 以 CPE URI substring 查詢產品或供應商相關 CVE |
 | `triage_alert` | 從自由文字 alert 中抽取 CVE/CWE/product hint，整合上述查詢 |
-| `schema_introspection` | 檢查 Neo4j labels、relationship types 與核心節點/邊數 |
+| `schema_introspection` | 除錯用：列出 Neo4j labels、relationship types 與核心節點/邊數 |
+
+**互動式圖譜查詢（Mode A+ — AI 寫 Cypher 並驗證）**
+
+| 工具 | 主要用途 |
+|---|---|
+| `get_schema` | 從 live graph 取樣 schema：node labels 的 property keys 與關係模式，供撰寫 Cypher 前參考 |
+| `execute_cypher` | 執行唯讀 Cypher 查詢，回傳結構化結果；寫入操作被攔截，所有錯誤回傳結構化 JSON |
 
 ## 5. `lookup_cve`
 
@@ -602,7 +611,143 @@ MATCH (:CAPEC)-[:Mapped_Attack]->(:ATTACK) RETURN count(*) AS c
 
 若 `CAPEC_to_ATTACK` 為 0，工具會提示 ATT&CK trace 將無法取得 mapping。這是 schema 或資料匯入層面的問題，不應被解讀為所有 CVE 都沒有攻擊技術關聯。
 
-## 11. 資料清理與去重行為
+## 11. `get_schema`
+
+### 用途
+
+從 live graph 取樣 schema，讓 AI agent 在撰寫 Cypher 前了解：
+
+- 有哪些 node label
+- 每個 label 上觀察到哪些 property keys
+- 關係的 from/type/to 模式（依出現次數排序）
+- 每種 relationship type 上觀察到哪些 property keys
+
+**重要：這是取樣觀察結果，不是完整權威 schema。**
+
+### 輸入
+
+無輸入。
+
+```json
+{}
+```
+
+### 查詢方式
+
+此工具會執行三類查詢：
+
+1. `CALL db.labels()` — 取得所有 node labels
+2. 每個 label 執行一次 `MATCH (n:Label) WITH n LIMIT 5 UNWIND keys(n) AS prop RETURN collect(DISTINCT prop) AS props` — 對最多 5 個節點做 property key union
+3. `CALL db.relationshipTypes()` + 每個 relationship type 執行一次相同的 5-sample union 查詢
+4. `MATCH (a)-[r]->(b) ... RETURN from_label, rel_type, to_label, count(*) LIMIT 200` — 取樣關係模式
+
+### 輸出
+
+```json
+{
+  "node_labels": ["ATTACK", "CAPEC", "CPE", "CVE", "CWE", "..."],
+  "node_properties": {
+    "CVE": ["Assigner", "Description", "Last_Modified_Date", "Name", "Published_Date"],
+    "CWE": ["Language", "Name"],
+    "CPE": ["uri"]
+  },
+  "relationship_patterns": [
+    {"from": "CVE", "type": "applicableIn", "to": "CPE", "count": 2795461},
+    {"from": "CVE", "type": "Problem_Type", "to": "CWE", "count": 334891}
+  ],
+  "relationship_properties": {
+    "Related_Weakness": ["Nature", "Ordinal", "View_ID"],
+    "applicableIn": ["Vulnerable"]
+  },
+  "sampling_note": "sampled: true — property keys and relationship patterns are observed from live graph samples (up to 5 nodes/edges per type). Sparse properties and low-frequency relationships may be absent. All identifiers are case-sensitive in Cypher."
+}
+```
+
+### 取樣限制
+
+- `node_properties` 的 property keys 是從最多 5 個節點觀察得到的 union，不保證覆蓋所有 sparse 欄位
+- `relationship_patterns` 從最多 200 個最高頻模式中取樣，低頻關係可能缺漏
+- multi-label 節點在關係模式中只取 `labels(n)[0]`
+- Neo4j 無法連線時，回傳 `{"error": "..."}`
+
+## 12. `execute_cypher`
+
+### 用途
+
+執行使用者（或 AI）撰寫的唯讀 Cypher 查詢，回傳結構化結果。適合用來：
+
+- 撰寫 Cypher 後驗證語法與結果是否正確，再整合進分析
+- 執行現有工具未涵蓋的 ad-hoc 圖譜查詢
+- 互動式確認圖譜內容
+
+### 輸入
+
+```json
+{
+  "query": "MATCH (c:CVE {Name: $cve_id})-[:Problem_Type]->(w:CWE) RETURN w.Name AS cwe LIMIT 10",
+  "params": {"cve_id": "CVE-2021-44228"},
+  "limit": 100
+}
+```
+
+| 欄位 | 說明 |
+|---|---|
+| `query` | Cypher MATCH/RETURN 查詢，不可為空 |
+| `params` | 可選。查詢中 `$參數名稱` 對應的值 |
+| `limit` | 可選，預設 100，最大 500。透過 driver-level lazy fetching 實作，不需要查詢本身有 LIMIT |
+
+### 安全限制
+
+此工具有兩層保護：
+
+1. **工具層 keyword 攔截**：偵測到 `CREATE`、`MERGE`、`SET`、`DELETE`、`DETACH`、`REMOVE`、`DROP`、`LOAD CSV` 等關鍵字時，不執行查詢，直接回傳結構化錯誤
+2. **資料庫層**：底層 Neo4j 帳號是 read-only user，即使繞過 keyword 攔截，寫入操作也會在 DB 層被拒絕
+
+keyword 攔截提供快速且可讀的錯誤訊息，不是安全邊界的唯一依賴。
+
+### 輸出
+
+成功時：
+
+```json
+{
+  "rows": [
+    {"cwe": "CWE-20"},
+    {"cwe": "CWE-502"}
+  ],
+  "count": 2,
+  "truncated": false,
+  "truncated_at": null
+}
+```
+
+任何失敗時（語法錯誤、連線失敗、寫入攔截、空查詢）：
+
+```json
+{
+  "error": "Invalid input '!!!': expected ...",
+  "error_type": "CypherSyntaxError",
+  "query": "THIS IS NOT VALID CYPHER !!!"
+}
+```
+
+此工具**永遠不會讓 MCP tool call 崩潰**。所有失敗都以結構化 JSON 回傳。`error_type` 欄位對 AI agent 可機讀：
+
+| `error_type` | 觸發情境 |
+|---|---|
+| `EmptyQuery` | 查詢字串為空 |
+| `WriteOperationNotAllowed` | 偵測到寫入關鍵字 |
+| `CypherSyntaxError` | Cypher 語法錯誤（Neo4j 回傳） |
+| `RuntimeError` | 連線失敗或 driver 初始化失敗 |
+| 其他 neo4j exception 類別名稱 | 其他執行期錯誤 |
+
+### limit 行為說明
+
+`limit` 透過 driver cursor 的 early-exit 實作：工具最多取出 `limit + 1` 筆 record，多出的那筆用來偵測是否有更多結果（設定 `truncated: true`），不繼續讀取。此設計避免在大圖譜上 materialise 完整結果集。
+
+若查詢本身已有 `LIMIT n`，`limit` 參數只在 driver 層截斷，不改寫 Cypher。兩者取較小值的那個先生效。
+
+## 13. 資料清理與去重行為
 
 各工具在 Cypher 查詢後還會做一層 Python 清理：
 
@@ -614,18 +759,19 @@ MATCH (:CAPEC)-[:Mapped_Attack]->(:ATTACK) RETURN count(*) AS c
 | `lookup_cpe_vulnerabilities` | score 轉 float、移除空 CWE、以 `limit + 1` 判斷 truncated |
 | `triage_alert` | 彙整各工具輸出，生成 observed、graph context、prioritization 三層 assessment |
 
-## 12. 安全與解讀限制
+## 14. 安全與解讀限制
 
 使用此 MCP server 時，應遵守下列限制：
 
 1. 不要把 CAPEC 或 ATT&CK mapping 說成已觀測到的攻擊行為。
 2. 不要因為沒有 ATT&CK mapping 就推論沒有風險。CAPEC -> ATT&CK 覆蓋本來就有限。
 3. 不要把 CPE substring match 當成精準資產命中。它只是產品名稱或供應商字串比對。
-4. 不要期待此服務做 free-form Cypher、semantic search、asset confirmation、KEV lookup 或即時 threat intelligence。
-5. 對於 `triage_alert`，如果輸入文字沒有 CVE/CWE，Mode A 的能力會非常有限。
-6. Evidence path 是 knowledge graph inference，需要與 alert telemetry、asset inventory、版本資訊、patch 狀態及實際 exploitation evidence 分開判讀。
+4. 不要把 `get_schema` 的結果當成完整 schema。property keys 是取樣觀察值，sparse 欄位可能缺漏。
+5. 不要依賴 `execute_cypher` 的 keyword 攔截作為唯一安全保護。底層帳號是 read-only，但 keyword guard 只是工具層的快速提示，不是完整 query 分析。
+6. 對於 `triage_alert`，如果輸入文字沒有 CVE/CWE，Mode A 的能力會非常有限。
+7. Evidence path 是 knowledge graph inference，需要與 alert telemetry、asset inventory、版本資訊、patch 狀態及實際 exploitation evidence 分開判讀。
 
-## 13. 建議使用順序
+## 15. 建議使用順序
 
 若已有特定 CVE：
 
@@ -653,12 +799,27 @@ lookup_cpe_vulnerabilities
 triage_alert(include_report=true)
 ```
 
+若需要撰寫 ad-hoc Cypher 查詢（互動式驗證流程）：
+
+```text
+get_schema                      ← 載入 label、property keys、關係模式
+execute_cypher(query=...)       ← 驗證 Cypher 語法與結果
+execute_cypher(query=..., limit=N)  ← 調整結果筆數
+```
+
 若結果看起來不合理：
 
 ```text
-schema_introspection
+schema_introspection            ← 確認 label 存在、核心節點/邊數是否正常
+get_schema                      ← 確認 property keys 與關係模式是否符合預期
 ```
 
-## 14. 核心結論
+## 16. 核心結論
 
-此 MCP server 的核心價值是提供固定、可重現的 cybersecurity knowledge graph 查詢。它能快速把 CVE、CWE、CPE、CAPEC 與 ATT&CK 背景關聯整理成結構化結果，但它不會確認資產是否真的受影響，也不會確認攻擊是否成功。對 SOC triage 而言，它適合提供上下文與優先級訊號，不適合單獨作為 incident conclusion。
+此 MCP server 提供兩種互補能力：
+
+**Mode A（固定查詢）** 提供固定、可重現的 cybersecurity knowledge graph 查詢。它能快速把 CVE、CWE、CPE、CAPEC 與 ATT&CK 背景關聯整理成結構化結果，適合 SOC triage 的上下文與優先級訊號。
+
+**Mode A+（互動式查詢）** 讓 AI agent 透過 `get_schema` 了解圖譜結構，再以 `execute_cypher` 撰寫並驗證任意唯讀 Cypher，適合探索固定工具未涵蓋的查詢需求。`get_schema` 的結果是取樣觀察，不是完整 schema；`execute_cypher` 永遠回傳結構化 JSON，包含成功結果或可機讀的錯誤型別。
+
+兩種模式都不會確認資產是否真的受影響，也不會確認攻擊是否成功。所有結果都需要與 alert telemetry、asset inventory 及實際 exploitation evidence 分開判讀。

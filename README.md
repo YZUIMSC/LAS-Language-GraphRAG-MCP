@@ -26,9 +26,10 @@ Core logic lives in `cyber_graph_triage/` and is **independent of MCP**. The MCP
 
 | Mode | Description | This repo |
 |------|-------------|-----------|
-| **A — Fixed Queries** | Deterministic Cypher, high reliability | **This PoC** |
+| **A — Fixed Queries** | Deterministic Cypher, high reliability | **Primary mode** |
+| **A+ — Interactive Cypher** | AI inspects schema, writes and validates Cypher interactively | **`get_schema` + `execute_cypher`** |
 | B — Controlled Exploration | Guided graph traversal, semantic search | Future |
-| C — Guarded Text2Cypher | LLM-generated Cypher with guardrails | Future |
+| C — Guarded Text2Cypher | Fully automated LLM-generated Cypher with guardrails | Future |
 
 ---
 
@@ -106,6 +107,8 @@ python server.py --transport sse --host 0.0.0.0 --port 8080
 
 ### Available MCP Tools
 
+**SOC Triage (Mode A — fixed Cypher)**
+
 | Tool | Description |
 |------|-------------|
 | `lookup_cve` | CVE details, CVSS, CWEs, CPEs, references |
@@ -113,7 +116,21 @@ python server.py --transport sse --host 0.0.0.0 --port 8080
 | `trace_cve_to_attack` | CVE → CWE → CAPEC → ATT&CK evidence paths |
 | `lookup_cpe_vulnerabilities` | CVEs by product/vendor CPE keyword |
 | `triage_alert` | Full SOC triage from alert text |
-| `schema_introspection` | Debug: list Neo4j labels and relationship types |
+| `schema_introspection` | Debug: node/edge counts and label health check |
+
+**Interactive Graph Query (Mode A+)**
+
+| Tool | Description |
+|------|-------------|
+| `get_schema` | Sampled schema view: node labels with observed property keys and relationship patterns. Call this before writing Cypher. |
+| `execute_cypher` | Execute a read-only Cypher query and get structured results. Write operations are blocked; errors return structured JSON, never crash the tool. |
+
+**Recommended interactive flow:**
+```
+get_schema          → understand labels, property keys, relationship patterns
+execute_cypher      → write and verify a Cypher query
+lookup_cve / …      → use dedicated tools for well-known query patterns
+```
 
 ---
 
@@ -288,6 +305,8 @@ cyber_graph_triage/
     trace_cve_to_attack.py
     lookup_cpe_vulnerabilities.py
     schema_introspection.py
+    get_schema.py                  # Sampled schema view for Cypher authoring
+    execute_cypher.py              # Read-only ad-hoc Cypher execution
   cypher/                          # Cypher queries (GraphKer schema)
     lookup_cve_graphker.cypher
     lookup_cwe_graphker.cypher
@@ -304,7 +323,9 @@ tests/
 
 ## Known Limitations (v0.1)
 
-- **No free Text2Cypher** — all queries are fixed and deterministic (Mode A only).
+- **`get_schema` is sampled, not authoritative** — property keys are collected from up to 5 nodes per label; sparse or rarely-populated properties may be absent. Treat it as orientation, not a guarantee of completeness.
+- **`execute_cypher` limit is driver-level** — `limit` stops fetching after N rows via cursor early-exit, but cannot override a `LIMIT` clause already in the query. If your query has `LIMIT 10000` and you pass `limit=10`, 10 rows are returned but the query still starts executing on the server side.
+- **`execute_cypher` write guard is keyword-based** — the underlying Neo4j account is read-only, so writes would be rejected by the database anyway; the keyword guard is a fast early signal, not a security boundary.
 - **ATT&CK mapping** depends on the presence of Technique nodes and their relationships in your graph. The server attempts several label/relationship name combinations and warns if none found.
 - **Asset context** — no Asset nodes in the base schema; CPE-based lookup requires a `product_hint`.
 - **No attack success assertion** — CAPEC/ATT&CK mappings indicate *possible* attack patterns, not confirmed observed techniques.
